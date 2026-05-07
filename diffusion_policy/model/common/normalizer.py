@@ -1,12 +1,20 @@
 from typing import Union, Dict
 
 import unittest
-import zarr
 import numpy as np
 import torch
 import torch.nn as nn
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.model.common.dict_of_tensor_mixin import DictOfTensorMixin
+
+try:
+    import zarr
+    ZarrArray = zarr.Array
+except ImportError:  # pragma: no cover
+    zarr = None
+
+    class ZarrArray:
+        pass
 
 
 class LinearNormalizer(DictOfTensorMixin):
@@ -14,7 +22,7 @@ class LinearNormalizer(DictOfTensorMixin):
     
     @torch.no_grad()
     def fit(self,
-        data: Union[Dict, torch.Tensor, np.ndarray, zarr.Array],
+        data: Union[Dict, torch.Tensor, np.ndarray, ZarrArray],
         last_n_dims=1,
         dtype=torch.float32,
         mode='limits',
@@ -103,7 +111,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
     
     @torch.no_grad()
     def fit(self,
-            data: Union[torch.Tensor, np.ndarray, zarr.Array],
+            data: Union[torch.Tensor, np.ndarray, ZarrArray],
             last_n_dims=1,
             dtype=torch.float32,
             mode='limits',
@@ -121,7 +129,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             fit_offset=fit_offset)
     
     @classmethod
-    def create_fit(cls, data: Union[torch.Tensor, np.ndarray, zarr.Array], **kwargs):
+    def create_fit(cls, data: Union[torch.Tensor, np.ndarray, ZarrArray], **kwargs):
         obj = cls()
         obj.fit(data, **kwargs)
         return obj
@@ -179,7 +187,7 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
 
 
 
-def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
+def _fit(data: Union[torch.Tensor, np.ndarray, ZarrArray],
         last_n_dims=1,
         dtype=torch.float32,
         mode='limits',
@@ -192,7 +200,7 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
     assert output_max > output_min
 
     # convert data to torch and type
-    if isinstance(data, zarr.Array):
+    if zarr is not None and isinstance(data, zarr.Array):
         data = data[:]
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
