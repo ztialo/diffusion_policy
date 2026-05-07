@@ -15,6 +15,7 @@ import pathlib
 from torch.utils.data import DataLoader
 import copy
 import random
+import time
 import wandb
 import tqdm
 import numpy as np
@@ -30,6 +31,15 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(int(round(float(seconds))), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
@@ -149,8 +159,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
+        run_start = time.time()
+        session_start_epoch = self.epoch
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
+                epoch_start = time.time()
                 step_log = dict()
                 # ========= train for this epoch ==========
                 if cfg.training.freeze_encoder:
@@ -207,6 +220,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
+                step_log['epoch_time'] = time.time() - epoch_start
+                step_log['run_elapsed'] = time.time() - run_start
+                completed_session_epochs = max((self.epoch - session_start_epoch + 1), 1)
+                avg_epoch_time = step_log['run_elapsed'] / completed_session_epochs
+                remaining_epochs = max(cfg.training.num_epochs - (self.epoch + 1), 0)
+                step_log['eta_seconds'] = avg_epoch_time * remaining_epochs
+                step_log['eta_hms'] = _format_duration(step_log['eta_seconds'])
 
                 # ========= eval for this epoch ==========
                 policy = self.model
@@ -285,6 +305,18 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 # log of last step is combined with validation and rollout
                 wandb_run.log(step_log, step=self.global_step)
                 json_logger.log(step_log)
+                val_loss_text = ""
+                if 'val_loss' in step_log:
+                    val_loss_text = f"val_loss={step_log['val_loss']:.6f} "
+                print(
+                    f"[INFO] Epoch {self.epoch + 1:03d}: "
+                    f"train_loss={step_log['train_loss']:.6f} "
+                    f"{val_loss_text}"
+                    f"lr={step_log['lr']:.6e} "
+                    f"epoch_time={_format_duration(step_log['epoch_time'])} "
+                    f"run_elapsed={_format_duration(step_log['run_elapsed'])} "
+                    f"eta={step_log['eta_hms']}"
+                )
                 self.global_step += 1
                 self.epoch += 1
 
