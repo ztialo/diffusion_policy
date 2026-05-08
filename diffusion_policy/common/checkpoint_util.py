@@ -1,5 +1,7 @@
 from typing import Optional, Dict
 import os
+import pathlib
+import re
 
 class TopKCheckpointManager:
     def __init__(self,
@@ -18,6 +20,54 @@ class TopKCheckpointManager:
         self.k = k
         self.format_str = format_str
         self.path_value_map = dict()
+        self._filename_pattern = self._compile_filename_pattern(format_str)
+        self._load_existing_checkpoints()
+
+    def _compile_filename_pattern(self, format_str: str):
+        pattern = re.escape(format_str)
+        pattern = re.sub(r'\\\{([a-zA-Z0-9_]+):[^}]+\\\}', r'(?P<\1>[^/]+)', pattern)
+        pattern = re.sub(r'\\\{([a-zA-Z0-9_]+)\\\}', r'(?P<\1>[^/]+)', pattern)
+        suffix = os.path.splitext(format_str)[1]
+        if suffix:
+            escaped_suffix = re.escape(suffix)
+            pattern = re.sub(
+                f"{escaped_suffix}$",
+                rf"(?:_epoch\d+)?{escaped_suffix}",
+                pattern,
+            )
+        return re.compile(f"^{pattern}$")
+
+    def _load_existing_checkpoints(self):
+        save_dir = pathlib.Path(self.save_dir)
+        if not save_dir.exists():
+            return
+
+        candidates = list()
+        for path in save_dir.iterdir():
+            if not path.is_file():
+                continue
+            match = self._filename_pattern.fullmatch(path.name)
+            if match is None:
+                continue
+            raw_value = match.groupdict().get(self.monitor_key)
+            if raw_value is None:
+                continue
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            candidates.append((str(path), value))
+
+        reverse = self.mode == 'max'
+        candidates.sort(key=lambda x: x[1], reverse=reverse)
+        kept = candidates[:self.k]
+        self.path_value_map = dict(kept)
+
+        for path_str, _ in candidates[self.k:]:
+            try:
+                os.remove(path_str)
+            except FileNotFoundError:
+                pass
     
     def get_ckpt_path(self, data: Dict[str, float]) -> Optional[str]:
         if self.k == 0:

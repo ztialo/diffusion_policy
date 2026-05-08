@@ -358,7 +358,6 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 'checkpoints', f'{tag}_epoch{epoch}.ckpt')
         else:
             path = pathlib.Path(path)
-            path = path.with_name(f'{path.stem}_epoch{epoch}{path.suffix}')
         if exclude_keys is None:
             exclude_keys = tuple(self.exclude_keys)
         if include_keys is None:
