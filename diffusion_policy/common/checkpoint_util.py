@@ -30,11 +30,8 @@ class TopKCheckpointManager:
         suffix = os.path.splitext(format_str)[1]
         if suffix:
             escaped_suffix = re.escape(suffix)
-            pattern = re.sub(
-                f"{escaped_suffix}$",
-                rf"(?:_epoch\d+)?{escaped_suffix}",
-                pattern,
-            )
+            if pattern.endswith(escaped_suffix):
+                pattern = pattern[: -len(escaped_suffix)] + rf"(?:_epoch\d+)?{escaped_suffix}"
         return re.compile(f"^{pattern}$")
 
     def _load_existing_checkpoints(self):
