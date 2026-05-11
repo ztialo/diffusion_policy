@@ -16,12 +16,11 @@ from diffusion_policy.model.common.normalizer import LinearNormalizer, SingleFie
 
 @dataclass(frozen=True)
 class EpisodeSpan:
-    start: int
-    end: int
+    rows: np.ndarray
 
     @property
     def length(self) -> int:
-        return self.end - self.start
+        return int(self.rows.shape[0])
 
 
 def _read_h5_rows(dataset, rows: np.ndarray) -> np.ndarray:
@@ -116,13 +115,24 @@ def load_episode_spans(h5_path: str) -> list[EpisodeSpan]:
             raise KeyError("Dataset is missing required key: done")
         done = np.asarray(h5_file["done"], dtype=np.bool_)
         spans: list[EpisodeSpan] = []
-        start = 0
-        for idx, is_done in enumerate(done):
-            if is_done:
-                spans.append(EpisodeSpan(start=start, end=idx + 1))
-                start = idx + 1
-        if start < len(done):
-            spans.append(EpisodeSpan(start=start, end=len(done)))
+        if "env_id" in h5_file:
+            env_ids = np.asarray(h5_file["env_id"], dtype=np.int64)
+            for env_id in np.unique(env_ids):
+                env_rows = np.nonzero(env_ids == env_id)[0]
+                env_done = done[env_rows]
+                start_idx = 0
+                for i, is_done in enumerate(env_done):
+                    if is_done:
+                        rows = env_rows[start_idx : i + 1].astype(np.int64, copy=True)
+                        spans.append(EpisodeSpan(rows=rows))
+                        start_idx = i + 1
+        else:
+            start = 0
+            for idx, is_done in enumerate(done):
+                if is_done:
+                    rows = np.arange(start, idx + 1, dtype=np.int64)
+                    spans.append(EpisodeSpan(rows=rows))
+                    start = idx + 1
     if not spans:
         raise ValueError("Dataset contains no complete episodes.")
     return spans
@@ -227,7 +237,7 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
             state_chunks = []
             action_chunks = []
             for span in self.train_spans:
-                rows = np.arange(span.start, span.end, dtype=np.int64)
+                rows = span.rows
                 state_chunks.append(build_state_from_h5(h5_file, rows, use_ft=self.use_ft))
                 raw_action = np.asarray(_read_h5_rows(h5_file["action"], rows), dtype=np.float32)
                 action_chunks.append(_convert_action_repr_numpy(raw_action, self.rotation_rep))
@@ -269,7 +279,7 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         with h5py.File(self.dataset_path, "r") as h5_file:
             chunks = []
             for span in self.train_spans:
-                rows = np.arange(span.start, span.end, dtype=np.int64)
+                rows = span.rows
                 raw_action = np.asarray(_read_h5_rows(h5_file["action"], rows), dtype=np.float32)
                 chunks.append(_convert_action_repr_numpy(raw_action, self.rotation_rep))
         return torch.from_numpy(np.concatenate(chunks, axis=0))
@@ -282,14 +292,15 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         self._ensure_open()
         episode_idx, step_idx = self.samples[idx]
         span = self.spans[episode_idx]
+        episode_rows = span.rows
 
         obs_offsets = np.arange(step_idx - self.n_obs_steps + 1, step_idx + 1)
         obs_offsets = np.clip(obs_offsets, 0, span.length - 1)
-        obs_rows = span.start + obs_offsets
+        obs_rows = episode_rows[obs_offsets]
 
         action_offsets = np.arange(step_idx, step_idx + self.horizon)
         action_offsets = np.clip(action_offsets, 0, span.length - 1)
-        action_rows = span.start + action_offsets
+        action_rows = episode_rows[action_offsets]
 
         wrist = np.asarray(_read_h5_rows(self._file["wrist_rgb"], obs_rows), dtype=np.float32)
         wrist = _center_crop_numpy(wrist, self.image_crop_size) / 255.0
