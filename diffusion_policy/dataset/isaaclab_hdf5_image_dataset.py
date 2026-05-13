@@ -95,6 +95,17 @@ def _center_crop_numpy(images: np.ndarray, crop_size: int | None) -> np.ndarray:
     return images[:, top : top + crop_size, left : left + crop_size, :]
 
 
+def _rgb_h5_key(obs_key: str, h5_file: h5py.File | None = None) -> str:
+    """Map an RGB obs key to the corresponding H5 dataset name."""
+    candidates = [f"{obs_key}_rgb", obs_key]
+    if h5_file is not None:
+        for candidate in candidates:
+            if candidate in h5_file:
+                return candidate
+        raise KeyError(f"Dataset is missing RGB key for obs '{obs_key}'. Tried {candidates}.")
+    return candidates[0]
+
+
 def build_state_from_h5(h5_file: h5py.File, rows: np.ndarray, use_ft: bool = False) -> np.ndarray:
     eef_pos = np.asarray(_read_h5_rows(h5_file["eef_pos"], rows), dtype=np.float32)
     eef_quat = np.asarray(_read_h5_rows(h5_file["eef_quat"], rows), dtype=np.float32)
@@ -216,8 +227,6 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
 
         self.rgb_keys = [key for key, attr in shape_meta["obs"].items() if attr.get("type", "low_dim") == "rgb"]
         self.lowdim_keys = [key for key, attr in shape_meta["obs"].items() if attr.get("type", "low_dim") == "low_dim"]
-        if self.rgb_keys != ["wrist"]:
-            raise ValueError(f"Expected shape_meta rgb obs keys to be ['wrist'], got {self.rgb_keys}")
         if self.lowdim_keys != ["state"]:
             raise ValueError(f"Expected shape_meta low_dim obs keys to be ['state'], got {self.lowdim_keys}")
 
@@ -251,7 +260,8 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
         normalizer["state"] = SingleFieldLinearNormalizer.create_fit(state, mode="limits")
         normalizer["action"] = SingleFieldLinearNormalizer.create_fit(action, mode="limits")
-        normalizer["wrist"] = get_image_range_normalizer()
+        for key in self.rgb_keys:
+            normalizer[key] = get_image_range_normalizer()
         return normalizer
 
     def get_validation_dataset(self) -> "IsaacLabHdf5ImageDataset":
@@ -302,18 +312,16 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         action_offsets = np.clip(action_offsets, 0, span.length - 1)
         action_rows = episode_rows[action_offsets]
 
-        wrist = np.asarray(_read_h5_rows(self._file["wrist_rgb"], obs_rows), dtype=np.float32)
-        wrist = _center_crop_numpy(wrist, self.image_crop_size) / 255.0
-        wrist = np.moveaxis(wrist, -1, 1).astype(np.float32)
+        rgb_obs = {}
+        for key in self.rgb_keys:
+            rgb = np.asarray(_read_h5_rows(self._file[_rgb_h5_key(key, self._file)], obs_rows), dtype=np.float32)
+            rgb = _center_crop_numpy(rgb, self.image_crop_size) / 255.0
+            rgb_obs[key] = np.moveaxis(rgb, -1, 1).astype(np.float32)
 
         state = build_state_from_h5(self._file, obs_rows, use_ft=self.use_ft).astype(np.float32)
         raw_action = np.asarray(_read_h5_rows(self._file["action"], action_rows), dtype=np.float32)
         action = _convert_action_repr_numpy(raw_action, self.rotation_rep).astype(np.float32)
 
-        return {
-            "obs": {
-                "wrist": torch.from_numpy(wrist),
-                "state": torch.from_numpy(state),
-            },
-            "action": torch.from_numpy(action),
-        }
+        obs = {key: torch.from_numpy(value) for key, value in rgb_obs.items()}
+        obs["state"] = torch.from_numpy(state)
+        return {"obs": obs, "action": torch.from_numpy(action)}
