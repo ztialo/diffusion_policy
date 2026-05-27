@@ -17,7 +17,10 @@ try:
         ForceEncoder,
     )
 except ImportError:
-    ForceEncoder = None
+    try:
+        from multimodal.models.base_models.encoders import ForceEncoder
+    except ImportError:
+        ForceEncoder = None
 
 logger = logging.getLogger(__name__)
 
