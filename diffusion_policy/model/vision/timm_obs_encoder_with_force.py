@@ -453,6 +453,8 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             B, T = data.shape[:2]
             assert B == batch_size
             assert data.shape[2:] == self.key_shape_map[key]
+            if data.ndim == 4:
+                data = data.reshape(B, T * data.shape[2], data.shape[3])
             data = data.permute(0, 2, 1)
             feature = self.key_model_map[key](data.float())[:, :, 0]
             assert len(feature.shape) == 2 and feature.shape[0] == B

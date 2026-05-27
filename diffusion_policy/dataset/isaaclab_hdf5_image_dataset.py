@@ -227,8 +227,16 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
 
         self.rgb_keys = [key for key, attr in shape_meta["obs"].items() if attr.get("type", "low_dim") == "rgb"]
         self.lowdim_keys = [key for key, attr in shape_meta["obs"].items() if attr.get("type", "low_dim") == "low_dim"]
-        if self.lowdim_keys != ["state"]:
-            raise ValueError(f"Expected shape_meta low_dim obs keys to be ['state'], got {self.lowdim_keys}")
+        self.state_keys = [key for key in self.lowdim_keys if key == "state"]
+        self.wrench_keys = [key for key in self.lowdim_keys if "wrench" in key]
+        unsupported_lowdim_keys = [
+            key for key in self.lowdim_keys if key not in self.state_keys + self.wrench_keys
+        ]
+        if self.state_keys != ["state"] or unsupported_lowdim_keys:
+            raise ValueError(
+                "Expected shape_meta low_dim obs keys to be ['state'] with optional wrench keys, "
+                f"got {self.lowdim_keys}"
+            )
 
         self.samples: list[tuple[int, int]] = []
         for episode_idx, span in enumerate(self.spans):
@@ -244,10 +252,15 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
     def _build_normalizer(self) -> LinearNormalizer:
         with h5py.File(self.dataset_path, "r") as h5_file:
             state_chunks = []
+            wrench_chunks = {key: [] for key in self.wrench_keys}
             action_chunks = []
             for span in self.train_spans:
                 rows = span.rows
-                state_chunks.append(build_state_from_h5(h5_file, rows, use_ft=self.use_ft))
+                state_chunks.append(build_state_from_h5(h5_file, rows, use_ft=False))
+                for key in self.wrench_keys:
+                    wrench_chunks[key].append(
+                        np.asarray(_read_h5_rows(h5_file[key], rows), dtype=np.float32)
+                    )
                 raw_action = np.asarray(_read_h5_rows(h5_file["action"], rows), dtype=np.float32)
                 action_chunks.append(_convert_action_repr_numpy(raw_action, self.rotation_rep))
 
@@ -259,6 +272,9 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
 
         normalizer = LinearNormalizer()
         normalizer["state"] = SingleFieldLinearNormalizer.create_fit(state, mode="limits")
+        for key, chunks in wrench_chunks.items():
+            wrench = np.concatenate(chunks, axis=0)
+            normalizer[key] = SingleFieldLinearNormalizer.create_fit(wrench, mode="limits")
         normalizer["action"] = SingleFieldLinearNormalizer.create_fit(action, mode="limits")
         for key in self.rgb_keys:
             normalizer[key] = get_image_range_normalizer()
@@ -318,10 +334,13 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
             rgb = _center_crop_numpy(rgb, self.image_crop_size) / 255.0
             rgb_obs[key] = np.moveaxis(rgb, -1, 1).astype(np.float32)
 
-        state = build_state_from_h5(self._file, obs_rows, use_ft=self.use_ft).astype(np.float32)
+        state = build_state_from_h5(self._file, obs_rows, use_ft=False).astype(np.float32)
         raw_action = np.asarray(_read_h5_rows(self._file["action"], action_rows), dtype=np.float32)
         action = _convert_action_repr_numpy(raw_action, self.rotation_rep).astype(np.float32)
 
         obs = {key: torch.from_numpy(value) for key, value in rgb_obs.items()}
         obs["state"] = torch.from_numpy(state)
+        for key in self.wrench_keys:
+            wrench = np.asarray(_read_h5_rows(self._file[key], obs_rows), dtype=np.float32)
+            obs[key] = torch.from_numpy(wrench)
         return {"obs": obs, "action": torch.from_numpy(action)}
