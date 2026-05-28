@@ -124,13 +124,14 @@ def _moving_average_ft(values: np.ndarray, window: int) -> np.ndarray:
     values = np.asarray(values, dtype=np.float32)
     if window <= 1:
         return values.copy()
-    kernel = np.ones(window, dtype=np.float32) / float(window)
-    pad_left = window // 2
-    pad_right = window - 1 - pad_left
-    padded = np.pad(values, ((pad_left, pad_right), (0, 0)), mode="edge")
+    padded = np.pad(values, ((window - 1, 0), (0, 0)), mode="edge")
     filtered = np.empty_like(values, dtype=np.float32)
     for axis_idx in range(values.shape[1]):
-        filtered[:, axis_idx] = np.convolve(padded[:, axis_idx], kernel, mode="valid")
+        cumsum = np.cumsum(padded[:, axis_idx], dtype=np.float32)
+        cumsum = np.concatenate(([0.0], cumsum), axis=0)
+        end = np.arange(window, window + values.shape[0], dtype=np.int64)
+        start = end - window
+        filtered[:, axis_idx] = (cumsum[end] - cumsum[start]) / float(window)
     return filtered
 
 
