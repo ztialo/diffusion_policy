@@ -455,6 +455,17 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             assert data.shape[2:] == self.key_shape_map[key]
             if data.ndim == 4:
                 data = data.reshape(B, T * data.shape[2], data.shape[3])
+            input_samples = getattr(self.force_encoder_cfg, "input_samples", None)
+            if input_samples is not None:
+                input_samples = int(input_samples)
+                if input_samples <= 0:
+                    raise ValueError(f"force_encoder_cfg.input_samples must be >= 1, got {input_samples}")
+                if data.shape[1] < input_samples:
+                    raise ValueError(
+                        f"force_encoder_cfg.input_samples={input_samples} exceeds available FT samples "
+                        f"{data.shape[1]} for key '{key}'."
+                    )
+                data = data[:, -input_samples:, :]
             data = data.permute(0, 2, 1)
             feature = self.key_model_map[key](data.float())[:, :, 0]
             assert len(feature.shape) == 2 and feature.shape[0] == B

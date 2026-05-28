@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from typing import Dict
 
@@ -272,6 +273,17 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         self.lowdim_keys = [key for key, attr in shape_meta["obs"].items() if attr.get("type", "low_dim") == "low_dim"]
         self.state_keys = [key for key in self.lowdim_keys if key == "state"]
         self.wrench_keys = [key for key in self.lowdim_keys if "wrench" in key]
+        sample_obs_meta = shape_meta.get("sample", {}).get("obs", {}).get("sparse", {})
+        self.wrench_horizon_steps = {
+            key: int(sample_obs_meta.get(key, {}).get("horizon", self.n_obs_steps))
+            for key in self.wrench_keys
+        }
+        self.wrench_raw_horizon_steps = {}
+        for key in self.wrench_keys:
+            shape = tuple(shape_meta["obs"][key]["shape"])
+            samples_per_step = int(shape[0]) if len(shape) >= 2 else 1
+            extra_steps = int(math.ceil(max(self.ft_ma_window - 1, 0) / float(samples_per_step)))
+            self.wrench_raw_horizon_steps[key] = self.wrench_horizon_steps[key] + extra_steps
         unsupported_lowdim_keys = [
             key for key in self.lowdim_keys if key not in self.state_keys + self.wrench_keys
         ]
@@ -391,11 +403,17 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         obs = {key: torch.from_numpy(value) for key, value in rgb_obs.items()}
         obs["state"] = torch.from_numpy(state)
         for key in self.wrench_keys:
-            wrench = np.asarray(_read_h5_rows(self._file[key], obs_rows), dtype=np.float32)
+            raw_horizon = self.wrench_raw_horizon_steps[key]
+            keep_horizon = self.wrench_horizon_steps[key]
+            wrench_offsets = np.arange(step_idx - raw_horizon + 1, step_idx + 1)
+            wrench_offsets = np.clip(wrench_offsets, 0, span.length - 1)
+            wrench_rows = episode_rows[wrench_offsets]
+            wrench = np.asarray(_read_h5_rows(self._file[key], wrench_rows), dtype=np.float32)
             wrench = _prepare_ft_wrench(
                 wrench,
                 negate=self.negate_ft,
                 ma_window=self.ft_ma_window,
             )
+            wrench = wrench[-keep_horizon:]
             obs[key] = torch.from_numpy(wrench)
         return {"obs": obs, "action": torch.from_numpy(action)}
