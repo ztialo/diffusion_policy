@@ -106,6 +106,44 @@ def _rgb_h5_key(obs_key: str, h5_file: h5py.File | None = None) -> str:
     return candidates[0]
 
 
+def _flatten_multirate_ft(values: np.ndarray) -> tuple[np.ndarray, int]:
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim == 3:
+        return values.reshape(values.shape[0] * values.shape[1], values.shape[2]), int(values.shape[1])
+    return values, 1
+
+
+def _reshape_multirate_ft(values: np.ndarray, samples_per_step: int, original_shape: tuple[int, ...]) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if len(original_shape) == 3:
+        return values.reshape(original_shape[0], samples_per_step, original_shape[2])
+    return values.reshape(original_shape)
+
+
+def _moving_average_ft(values: np.ndarray, window: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if window <= 1:
+        return values.copy()
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    pad_left = window // 2
+    pad_right = window - 1 - pad_left
+    padded = np.pad(values, ((pad_left, pad_right), (0, 0)), mode="edge")
+    filtered = np.empty_like(values, dtype=np.float32)
+    for axis_idx in range(values.shape[1]):
+        filtered[:, axis_idx] = np.convolve(padded[:, axis_idx], kernel, mode="valid")
+    return filtered
+
+
+def _prepare_ft_wrench(values: np.ndarray, negate: bool, ma_window: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    original_shape = values.shape
+    flat, samples_per_step = _flatten_multirate_ft(values)
+    if negate:
+        flat = -flat
+    flat = _moving_average_ft(flat, ma_window)
+    return _reshape_multirate_ft(flat, samples_per_step, original_shape)
+
+
 def build_state_from_h5(h5_file: h5py.File, rows: np.ndarray, use_ft: bool = False) -> np.ndarray:
     eef_pos = np.asarray(_read_h5_rows(h5_file["eef_pos"], rows), dtype=np.float32)
     eef_quat = np.asarray(_read_h5_rows(h5_file["eef_quat"], rows), dtype=np.float32)
@@ -194,6 +232,8 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         max_val_episodes: int | None = None,
         image_crop_size: int | None = None,
         use_ft: bool = False,
+        ft_ma_window: int = 1,
+        negate_ft: bool = False,
         rotation_rep: str = "raw",
         train: bool = True,
         train_spans: list[EpisodeSpan] | None = None,
@@ -208,6 +248,8 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         self.n_obs_steps = int(n_obs_steps) if n_obs_steps is not None else self.horizon
         self.image_crop_size = image_crop_size
         self.use_ft = bool(use_ft)
+        self.ft_ma_window = int(ft_ma_window)
+        self.negate_ft = bool(negate_ft)
         self.rotation_rep = rotation_rep
         self.train = bool(train)
         self._file = None
@@ -258,8 +300,13 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
                 rows = span.rows
                 state_chunks.append(build_state_from_h5(h5_file, rows, use_ft=False))
                 for key in self.wrench_keys:
+                    wrench = np.asarray(_read_h5_rows(h5_file[key], rows), dtype=np.float32)
                     wrench_chunks[key].append(
-                        np.asarray(_read_h5_rows(h5_file[key], rows), dtype=np.float32)
+                        _prepare_ft_wrench(
+                            wrench,
+                            negate=self.negate_ft,
+                            ma_window=self.ft_ma_window,
+                        )
                     )
                 raw_action = np.asarray(_read_h5_rows(h5_file["action"], rows), dtype=np.float32)
                 action_chunks.append(_convert_action_repr_numpy(raw_action, self.rotation_rep))
@@ -290,6 +337,8 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
             n_obs_steps=self.n_obs_steps,
             image_crop_size=self.image_crop_size,
             use_ft=self.use_ft,
+            ft_ma_window=self.ft_ma_window,
+            negate_ft=self.negate_ft,
             rotation_rep=self.rotation_rep,
             train=False,
             train_spans=self.train_spans,
@@ -342,5 +391,10 @@ class IsaacLabHdf5ImageDataset(BaseImageDataset):
         obs["state"] = torch.from_numpy(state)
         for key in self.wrench_keys:
             wrench = np.asarray(_read_h5_rows(self._file[key], obs_rows), dtype=np.float32)
+            wrench = _prepare_ft_wrench(
+                wrench,
+                negate=self.negate_ft,
+                ma_window=self.ft_ma_window,
+            )
             obs[key] = torch.from_numpy(wrench)
         return {"obs": obs, "action": torch.from_numpy(action)}
